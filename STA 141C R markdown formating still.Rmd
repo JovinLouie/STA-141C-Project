@@ -1,0 +1,187 @@
+---
+title: "STA 141C R markdown project"
+author: "Ricky Nunez"
+date: "2025-05-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-data}
+data <- read.csv("C:/Users/ricky/Desktop/quarter 3/enhanced_anxiety_dataset.csv")
+str(data)
+summary(data)
+```
+
+```{r sdr-sir}
+install.packages("dr")
+library(dr)
+
+data_numeric <- data[sapply(data, is.numeric)]
+Y <- data_numeric$Anxiety.Level..1.10.
+X <- data_numeric[, !(names(data_numeric) %in% "Anxiety.Level..1.10.")]
+for (i in 1:ncol(X)) {
+  X[is.na(X[, i]), i] <- mean(X[, i], na.rm = TRUE)
+}
+sir_result <- dr(Y ~ ., data = as.data.frame(X), method = "sir")
+summary(sir_result)
+plot(sir_result)
+```
+
+```{r lasso-logistic}
+install.packages("glmnet")
+library(glmnet)
+Z <- sir_result$x[, 1:3]
+Y_binary <- as.numeric(data$Anxiety.Level..1.10. >= 5)
+Z_matrix <- as.matrix(Z)
+lasso_model <- cv.glmnet(Z_matrix, Y_binary, alpha = 1, family = "binomial")
+best_lambda <- lasso_model$lambda.min
+cat("Best lambda:", best_lambda, "\n")
+coef(lasso_model, s = "lambda.min")
+pred_probs <- predict(lasso_model, newx = Z_matrix, s = "lambda.min", type = "response")
+pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+table(Predicted = pred_classes, Actual = Y_binary)
+mean(pred_classes == Y_binary)
+```
+
+```{r linear-regression-sdr}
+colnames(Z) <- c("Dir1", "Dir2", "Dir3")
+lm_model <- lm(Y ~ ., data = as.data.frame(Z))
+summary(lm_model)
+predicted <- predict(lm_model)
+mse <- mean((Y - predicted)^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(Y - predicted))
+r2 <- summary(lm_model)$r.squared
+adj_r2 <- summary(lm_model)$adj.r.squared
+cat("MSE:", mse, "\nRMSE:", rmse, "\nMAE:", mae, "\nR^2:", r2, "\nAdjusted R^2:", adj_r2, "\n")
+```
+
+```{r lasso-linear regression-full}
+data_numeric <- data[sapply(data, is.numeric)]
+Y <- data_numeric$Anxiety.Level..1.10.
+X <- data_numeric[, !(names(data_numeric) %in% "Anxiety.Level..1.10.")]
+for (i in 1:ncol(X)) {
+  X[is.na(X[, i]), i] <- mean(X[, i], na.rm = TRUE)
+}
+X_matrix <- as.matrix(X)
+set.seed(123)
+lasso_cv <- cv.glmnet(X_matrix, Y, alpha = 1, family = "gaussian")
+best_lambda <- lasso_cv$lambda.min
+lasso_coef <- coef(lasso_cv, s = "lambda.min")
+print(lasso_coef)
+predicted <- predict(lasso_cv, newx = X_matrix, s = "lambda.min")
+mse <- mean((Y - predicted)^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(Y - predicted))
+r2 <- 1 - sum((Y - predicted)^2) / sum((Y - mean(Y))^2)
+adj_r2 <- 1 - (1 - r2) * (length(Y) - 1) / (length(Y) - ncol(X_matrix) - 1)
+cat("MSE:", mse, "\nRMSE:", rmse, "\nMAE:", mae, "\nR^2:", r2, "\nAdjusted R^2:", adj_r2, "\n")
+```
+
+```{r lasso linear regression - with catagorical variable dummies}
+categorical_vars <- data[sapply(data, function(x) is.factor(x) || is.character(x))]
+dummy_vars <- model.matrix(~ . - 1, data = categorical_vars)
+X_full <- cbind(X, dummy_vars)
+X_matrix_full <- as.matrix(X_full)
+lasso_cv <- cv.glmnet(X_matrix_full, Y, alpha = 1, family = "gaussian") ###10 fold cross validation
+best_lambda <- lasso_cv$lambda.min
+lasso_coef <- coef(lasso_cv, s = best_lambda)
+print(lasso_coef)
+predicted <- predict(lasso_cv, newx = X_matrix_full, s = best_lambda)
+mse <- mean((Y - predicted)^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(Y - predicted))
+r2 <- 1 - sum((Y - predicted)^2) / sum((Y - mean(Y))^2)
+adj_r2 <- 1 - (1 - r2) * (length(Y) - 1) / (length(Y) - ncol(X_matrix_full) - 1)
+cat("MSE:", mse, "\nRMSE:", rmse, "\nMAE:", mae, "\nR^2:", r2, "\nAdjusted R^2:", adj_r2, "\n")
+```
+
+```{r random-forest}
+install.packages("randomForest")
+library(randomForest)
+# Make sure categorical columns are factors
+categorical_vars <- c("Gender", "Occupation", "Smoking", "Family.History.of.Anxiety",
+                      "Dizziness", "Medication", "Recent.Major.Life.Event")
+data[categorical_vars] <- lapply(data[categorical_vars], as.factor)
+
+# Replace NAs in numeric variables with column means
+numeric_vars <- sapply(data, is.numeric)
+for (col in names(data)[numeric_vars]) {
+  data[[col]][is.na(data[[col]])] <- mean(data[[col]], na.rm = TRUE)
+}
+set.seed(123)
+rf_model <- randomForest(Anxiety.Level..1.10. ~ ., data = data, ntree = 500, importance = TRUE) ###OOB error estimation 37% OOB error vs 63% trained
+predicted <- predict(rf_model)
+Y <- data$Anxiety.Level..1.10.
+mse <- mean((Y - predicted)^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(Y - predicted))
+r2 <- 1 - sum((Y - predicted)^2) / sum((Y - mean(Y))^2)
+adj_r2 <- 1 - (1 - r2) * (length(Y) - 1) / (length(Y) - ncol(X) - 1)
+cat("MSE:", mse, "\nRMSE:", rmse, "\nMAE:", mae, "\nR^2:", r2, "\nAdjusted R^2:", adj_r2, "\n")
+importance(rf_model)
+varImpPlot(rf_model)
+```
+
+```{r svm}
+install.packages("e1071")
+library(e1071)
+X_combined <- cbind(X, dummy_vars)
+X_matrix <- as.matrix(X_combined)
+set.seed(123)
+train_idx <- sample(1:nrow(X_matrix), 0.8 * nrow(X_matrix)) ### 80/20 training split
+X_train <- X_matrix[train_idx, ]
+Y_train <- Y[train_idx]
+X_test <- X_matrix[-train_idx, ]
+Y_test <- Y[-train_idx]
+svm_model <- svm(x = X_train, y = Y_train, type = "eps-regression", kernel = "radial")
+predictions <- predict(svm_model, newdata = X_test)
+mse <- mean((Y_test - predictions)^2)
+rmse <- sqrt(mse)
+mae <- mean(abs(Y_test - predictions))
+r2 <- 1 - sum((Y_test - predictions)^2) / sum((Y_test - mean(Y_test))^2)
+cat("SVM Regression Performance:\n")
+cat("MSE:", mse, "\nRMSE:", rmse, "\nMAE:", mae, "\nR^2:", r2, "\n")
+```
+
+```{r svm-tuning DON'T RUN THIS IT'LL TAKE FOREVER}
+tuned <- tune(
+  svm,
+  train.x = X_train,
+  train.y = Y_train,
+  kernel = "radial",
+  type = "eps-regression",
+  ranges = list(
+    cost = c(0.1, 1, 10),
+    epsilon = c(0.01, 0.1, 0.5),
+    gamma = c(0.001, 0.01, 0.1)
+  )
+)
+best_model <- tuned$best.model
+summary(best_model)
+predictions <- predict(best_model, newdata = X_test)
+```
+
+```{r checking for nonlienarity}
+library(ggplot2)
+
+# Fit the linear model
+model <- lm(Anxiety.Level..1.10. ~ ., data = data)
+
+# Create a data frame of fitted values and residuals
+resid_df <- data.frame(
+  Fitted = fitted(model),
+  Residuals = resid(model)
+)
+
+# Plot with ggplot
+ggplot(resid_df, aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Residuals vs Fitted", x = "Fitted Values", y = "Residuals") +
+  theme_minimal()
+
+```
