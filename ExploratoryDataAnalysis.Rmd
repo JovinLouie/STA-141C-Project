@@ -1,0 +1,192 @@
+---
+title: "EDA"
+author: "Jovin Louie"
+# date: "2025-04-29"
+# output: pdf_document
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(scales)
+```
+
+```{r}
+data = read_csv('data/Breast_GSE45827.csv', show_col_types = FALSE)
+```
+
+```{r}
+dim(data)
+
+head(data)
+```
+
+
+
+```{r}
+# remove first 2 columns (samples and types)
+gene_data = data[, -(1:2)]
+
+gene_summary = tibble(
+  Gene = colnames(gene_data),
+  Mean = colMeans(gene_data, na.rm = TRUE),
+  Median = apply(gene_data, 2, median, na.rm = TRUE),
+  SD = apply(gene_data, 2, sd, na.rm = TRUE),
+  Min = apply(gene_data, 2, min, na.rm = TRUE),
+  Max = apply(gene_data, 2, max, na.rm = TRUE),
+)
+
+head(gene_summary)
+```
+
+```{r}
+# Flatten to a vector
+all_values = unlist(gene_data, use.names = FALSE)
+
+overall_summary = tibble(
+  # Gene = colnames(gene_data),
+  Mean = mean(all_values, na.rm = TRUE),
+  Median = median(all_values, na.rm = TRUE),
+  SD = sd(all_values, na.rm = TRUE),
+  Min = min(all_values, na.rm = TRUE),
+  Max = max(all_values, na.rm = TRUE),
+)
+
+head(overall_summary)
+
+print(paste("Mean:", overall_summary$Mean))
+print(paste("Median:", overall_summary$Median))
+print(paste("Standard Deviation:", overall_summary$SD))
+print(paste("Min:", overall_summary$Min))
+print(paste("Max:", overall_summary$Max))
+```
+
+```{r}
+all_values = unlist(gene_data, use.names = FALSE)
+expression_df = tibble(Expression = all_values)
+
+ggplot(expression_df, aes(x = Expression)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of All Gene Expression Values",
+       x = "Expression Level", y = "Frequency") +
+  scale_x_continuous(
+    # labels = label_comma(),
+    breaks = seq(0, 20, by = 1)  # Adjust max based on your data
+  ) +
+  scale_y_continuous(
+    labels = label_comma(),
+    breaks = seq(0, 500000, by = 50000)  # Adjust max based on your data
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Prepare data: expression as y-axis
+expression_df = tibble(Expression = unlist(data[ , -(1:2)], use.names = FALSE))
+
+# Add dummy variable for plotting
+expression_df$Group = "All Genes"
+
+ggplot(expression_df, aes(y = Group, x = Expression)) +
+  geom_boxplot(fill = "skyblue") +
+  labs(title = "Overall Distribution of Gene Expression Values",
+       y = "", x = "Expression Level")
+```
+
+
+```{r}
+# Pivot to long format
+data_long = data %>%
+  pivot_longer(cols = -(samples:type), names_to = "Gene", values_to = "Expression")
+
+# Compute stats by class and gene
+grouped_summary = data_long %>%
+  group_by(type, Gene) %>%
+  summarise(
+    Mean = mean(Expression, na.rm = TRUE),
+    Median = median(Expression, na.rm = TRUE),
+    SD = sd(Expression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Preview
+head(grouped_summary)
+```
+
+
+```{r}
+set.seed(123)
+# Boxplot for a few random samples to keep it readable
+sample_subset = sample(unique(data_long$samples), 25)
+plot_data = data_long %>% filter(samples %in% sample_subset)
+
+# plot_data = data_long %>% filter(samples %in% data_long$samples)
+
+ggplot(plot_data, aes(x = factor(samples), y = Expression)) +
+  geom_boxplot(outlier.size = 0.5, fill = "lightgreen") +
+  labs(title = "Expression Distribution per Sample (Subset)",
+       x = "Sample ID", y = "Expression Level") +
+  theme_minimal()
+```
+
+
+```{r}
+# Compute summary statistics per row (i.e., per sample)
+sample_summary <- tibble(
+  SampleID = data$samples,
+  Type     = data$type,
+  Mean     = apply(gene_data, 1, mean, na.rm = TRUE),
+  Median   = apply(gene_data, 1, median, na.rm = TRUE),
+  SD       = apply(gene_data, 1, sd, na.rm = TRUE),
+  Min      = apply(gene_data, 1, min, na.rm = TRUE),
+  Max      = apply(gene_data, 1, max, na.rm = TRUE)
+)
+
+# Preview the result
+head(sample_summary)
+```
+
+```{r}
+# Sample with highest mean expression
+max_mean_sample <- sample_summary %>%
+  filter(Mean == max(Mean, na.rm = TRUE))
+
+# Sample with lowest mean expression
+min_mean_sample <- sample_summary %>%
+  filter(Mean == min(Mean, na.rm = TRUE))
+
+# Print results
+cat("Sample with MAX mean expression:\n")
+print(max_mean_sample)
+
+cat("\nSample with MIN mean expression:\n")
+print(min_mean_sample)
+```
+
+
+```{r}
+# Sample with highest expression
+max_sample <- sample_summary %>%
+  filter(Max == max(Max, na.rm = TRUE))
+
+# Sample with lowest expression
+min_sample <- sample_summary %>%
+  filter(Min == min(Min, na.rm = TRUE))
+
+# Print results
+cat("Sample with MAX mean expression:\n")
+print(min_sample)
+
+cat("\nSample with MIN mean expression:\n")
+print(max_sample)
+```
+
+
+```{r}
+ggplot(sample_summary, aes(y = Type, x = Mean)) +
+  geom_boxplot(fill = "lightgreen") +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, color = "red") +
+  labs(title = "Distribution of Sample Means by Cancer Type",
+       x = "Expression Level") +
+  theme_minimal()
+```
