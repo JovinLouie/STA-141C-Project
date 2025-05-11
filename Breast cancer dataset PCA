@@ -1,0 +1,176 @@
+---
+title: "STA 141C PCA testing BC"
+author: "Ricky Nunez"
+date: "2025-05-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(readr)
+library(caret)
+library(pROC)
+library(glmnet)
+library(ggplot2)
+
+# Read the CSV
+data <- read_csv("C:/Users/ricky/Downloads/archive (3)/Breast_GSE45827.csv")
+
+# Preview the data
+head(data)
+
+# Show the types of all columns
+str(data)
+
+# Identify categorical columns
+cat_vars <- names(data)[sapply(data, function(col) is.factor(col) || is.character(col))]
+cat_vars
+
+# Save target before encoding
+target_labels <- data$type  # Save labels to reassign later
+
+# One-hot encode 'type' (dropping it from the original)
+onehot_type <- model.matrix(~ type - 1, data = data)
+
+# Combine numeric data + one-hot encoded 'type'
+data_encoded <- cbind(data[ , !(names(data) %in% "type")], onehot_type)
+
+# Reassign original labels as a new factor column
+data_encoded$target <- as.factor(target_labels)
+
+# View the cleaned data
+head(data_encoded)
+names(data_encoded)
+
+
+```
+
+```{r heatmap}
+# 1. Extract features (numeric genes only)
+features <- data[, !(names(data) %in% c("samples", "type"))]
+
+# 2. Calculate variance of each gene
+gene_vars <- apply(features, 2, var)
+
+# 3. Select top 100 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE)[1:100])
+
+# 4. Subset features to just those top genes
+heatmap_data <- features[, top_genes]
+
+# 5. Scale each gene (Z-score per column)
+heatmap_scaled <- scale(heatmap_data)
+
+# 6. Set rownames to sample names (if missing, create dummy rownames)
+if (is.null(rownames(heatmap_scaled))) {
+  rownames(heatmap_scaled) <- paste0("Sample", 1:nrow(heatmap_scaled))
+}
+
+data$type <- factor(data$type, levels = c("normal", "cell_line", "luminal_A", "luminal_B", "HER", "basal"))
+
+# 7. Create annotation frame (sample type labels)
+annotation_df <- data.frame(Type = data$type)
+rownames(annotation_df) <- rownames(heatmap_scaled)
+
+# 8. Define annotation colors
+annotation_colors <- list(
+  Type = c(
+    "normal" = "skyblue",
+    "cell_line" = "orange",
+    "luminal_A" = "purple",
+    "luminal_B" = "pink",
+    "HER" = "red",
+    "basal" = "green"
+  )
+)
+
+# 9. Load library and plot
+library(pheatmap)
+
+pheatmap(
+  mat = heatmap_scaled,
+  annotation_row = annotation_df,
+  annotation_colors = annotation_colors,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = FALSE,
+  main = "Heatmap of Top 100 Most Variable Genes"
+)
+
+
+```
+
+```{r PCA} 
+# Load required libraries
+library(ggplot2)
+
+# Extract numeric features (remove ID and label columns)
+features <- data[, !(names(data) %in% c("samples", "type"))]
+
+# Step 1: Perform PCA
+pca_result <- prcomp(features, center = TRUE, scale. = TRUE)
+
+# Step 2: Variance explained
+explained_var <- pca_result$sdev^2
+prop_var <- explained_var / sum(explained_var)
+cum_var <- cumsum(prop_var)
+
+# Step 3: Find number of components for 95% variance
+num_pc_95 <- which(cum_var >= 0.95)[1]
+cat("Number of PCs to capture ≥95% variance:", num_pc_95, "\n")
+
+# Step 4: Create cumulative variance plot
+scree_data <- data.frame(
+  PC = 1:length(prop_var),
+  CumulativeVariance = cum_var
+)
+
+ggplot(scree_data, aes(x = PC, y = CumulativeVariance)) +
+  geom_line(color = "blue") +
+  geom_point() +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = num_pc_95, linetype = "dotted", color = "darkgreen") +
+  theme_minimal() +
+  labs(
+    title = "Cumulative Variance Explained by PCA",
+    x = "Number of Principal Components",
+    y = "Cumulative Proportion of Variance Explained"
+  )
+
+##########################bar plot
+# Step 1: Variance calculations
+explained_var <- pca_result$sdev^2
+prop_var <- explained_var / sum(explained_var)
+cum_var <- cumsum(prop_var)
+
+# Step 2: Create a data frame for plotting
+scree_data <- data.frame(
+  PC = factor(paste0("PC", 1:length(prop_var)), levels = paste0("PC", 1:length(prop_var))),
+  VarianceExplained = prop_var,
+  CumulativeVariance = cum_var
+)
+
+# Step 3: Bar plot (first126 PCs for clarity)
+ggplot(scree_data[1:126, ], aes(x = PC, y = VarianceExplained)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "green") +
+  theme_minimal() +
+  labs(
+    title = "Scree Plot (Bar) with Cumulative Variance Line",
+    x = "Principal Components",
+    y = "Proportion of Variance Explained"
+  ) +
+ scale_y_continuous(limits = c(0, 0.125)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Option 2: just get number of total PCs
+ncol(pca_result$x)
+
+# Project original data onto the top components
+pca_95_data <- as.data.frame(pca_result$x[, 1:num_pc_95])
+
+# Add back the labels
+pca_95_data$target <- data$type
+```
