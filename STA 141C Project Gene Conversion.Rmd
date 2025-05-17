@@ -1,0 +1,54 @@
+---
+title: "STA 141C Gene Expression Conversion"
+author: "Jenny Xu"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Reference: https://omicstutorials.com/step-by-step-guide-converting-affymetrix-probes-to-gene-ids-using-r-and-bioconductor/
+# Install BioConductor if not already installed
+install.packages("BiocManager")
+BiocManager::install()
+# Install the specific chip annotation package (for human data, use hgu133a.db as an example)
+BiocManager::install("hgu133a.db") # Replace with your specific chip if using a different one
+BiocManager::install("AnnotationDbi")
+
+# Load necessary libraries
+library(AnnotationDbi)
+library(hgu133a.db) # Change this to your chip-specific package
+```
+```{r}
+# Read data
+data = read.csv("Breast_GSE45827.csv")
+
+# Remove the "X" notation before microarray probe id due to R reading data
+colnames(data)[3:ncol(data)] <- gsub("^X", "", colnames(data)[3:ncol(data)])
+
+# Convert probe id into gene symbol and name
+probe_ids = colnames(data)[3:ncol(data)]
+gene_info = select(hgu133a.db, 
+                   keys = probe_ids,
+                   columns=c("SYMBOL", "ENTREZID", "GENENAME"),
+                   keytype="PROBEID")
+
+# Check the the proportion of probe id that mapped to gene symbols
+mean(!is.na(gene_info$SYMBOL))
+
+# Filter out NA rows to keep only probes that map to real genes
+gene_info_filtered = gene_info[!is.na(gene_info$SYMBOL),]
+
+# Check the proportion of multiple gene mapping for a single probe
+mean(!duplicated(gene_info_filtered$PROBEID))
+
+# Remove duplicate rows if there are multiple gene mappings for a single probe
+gene_info_unique = gene_info_filtered[!duplicated(gene_info_filtered$PROBEID), ]
+
+# Save the result to a CSV file
+write.csv(gene_info_unique, "converted_gene_ids.csv", row.names=FALSE)
+```
+
