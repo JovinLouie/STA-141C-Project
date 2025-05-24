@@ -1,0 +1,562 @@
+---
+title: "STA 141C PCA testing BC"
+author: "Ricky Nunez"
+date: "2025-05-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(readr)
+library(caret)
+library(dplyr)
+library(pROC)
+library(glmnet)
+library(ggplot2)
+library(smotefamily)
+library(randomForest)
+library(e1071)
+library(rpart)
+library(kknn)
+
+
+
+# Read the CSV
+data <- read_csv("C:/Users/ricky/Downloads/archive (3)/Breast_GSE45827.csv")
+
+# Identify categorical columns
+cat_vars <- names(data)[sapply(data, function(col) is.factor(col) || is.character(col))]
+cat_vars
+
+# Save target before encoding
+target_labels <- data$type  # Save labels to reassign later
+
+# One-hot encode 'type' (dropping it from the original)
+onehot_type <- model.matrix(~ type - 1, data = data)
+
+# Combine numeric data + one-hot encoded 'type'
+data_encoded <- cbind(data[ , !(names(data) %in% "type")], onehot_type)
+
+# Reassign original labels as a new factor column
+data_encoded$target <- as.factor(target_labels)
+
+# View the cleaned data
+head(data_encoded)
+names(data_encoded)
+``` 
+
+```{r upsample-all-then-split}
+library(caret)
+
+# 1. Build a data.frame of **all** features + target
+full_df <- data.frame(
+  data_encoded[ , setdiff(names(data_encoded), "target")],
+  target = data_encoded$target
+)
+
+# 2. Upsample the entire data set
+set.seed(3)
+full_upsampled <- upSample(
+  x     = full_df[ , setdiff(names(full_df), "target")],
+  y     = full_df$target,
+  yname = "target"
+)
+
+# Check that all classes now have the same count:
+table(full_upsampled$target)
+
+# 3. Now split *that* balanced set 80/20
+set.seed(123)
+split_idx <- createDataPartition(full_upsampled$target, p = 0.8, list = FALSE)
+train_df <- full_upsampled[ split_idx, ]
+test_df  <- full_upsampled[-split_idx, ]
+
+# 4. Extract X/y for both sets
+X_train_resampled <- train_df[ , setdiff(names(train_df), "target") ]
+y_train_resampled <- train_df$target
+
+X_test_resampled  <- test_df[ , setdiff(names(test_df),  "target") ]
+y_test_resampled  <- test_df$target
+
+# 5. (Optional sanity check)
+cat("Train rows:", nrow(X_train_resampled), "\n")
+cat("Test  rows:", nrow(X_test_resampled), "\n")
+
+```
+
+```{r target-distribution-plots, fig.width=10, fig.height=4}
+library(ggplot2)
+library(dplyr)
+
+# Count per class
+type_counts <- data %>%
+  count(type) %>%
+  mutate(Percentage = n / sum(n) * 100)
+
+# Bar plot of class counts
+bar_plot <- ggplot(type_counts, aes(x = type, y = n, fill = type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sample Count by Class", x = "Cancer Subtype", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Pie chart of class proportions
+pie_plot <- ggplot(type_counts, aes(x = "", y = Percentage, fill = type)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  labs(title = "Class Distribution (Pie Chart)") +
+  theme_void() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")),
+            position = position_stack(vjust = 0.5), color = "white", size = 4)
+
+# Combine the two plots using gridExtra
+library(gridExtra)
+grid.arrange(bar_plot, pie_plot, ncol = 2)
+```
+
+```{r heatmap}
+# 1. Extract features (numeric genes only)
+features <- data[, !(names(data) %in% c("samples", "type"))]
+
+# 2. Calculate variance of each gene
+gene_vars <- apply(features, 2, var)
+
+# 3. Select top 100 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE)[1:100])
+
+# 4. Subset features to just those top genes
+heatmap_data <- features[, top_genes]
+
+# 5. Scale each gene (Z-score per column)
+heatmap_scaled <- scale(heatmap_data)
+
+# 6. Set rownames to sample names (if missing, create dummy rownames)
+if (is.null(rownames(heatmap_scaled))) {
+  rownames(heatmap_scaled) <- paste0("Sample", 1:nrow(heatmap_scaled))
+}
+
+data$type <- factor(data$type, levels = c("normal", "cell_line", "luminal_A", "luminal_B", "HER", "basal"))
+
+# 7. Create annotation frame (sample type labels)
+annotation_df <- data.frame(Type = data$type)
+rownames(annotation_df) <- rownames(heatmap_scaled)
+
+# 8. Define annotation colors
+annotation_colors <- list(
+  Type = c(
+    "normal" = "skyblue",
+    "cell_line" = "orange",
+    "luminal_A" = "purple",
+    "luminal_B" = "pink",
+    "HER" = "red",
+    "basal" = "green"
+  )
+)
+
+# 9. Load library and plot
+library(pheatmap)
+
+pheatmap(
+  mat = heatmap_scaled,
+  annotation_row = annotation_df,
+  annotation_colors = annotation_colors,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = FALSE,
+  main = "Heatmap of Top 100 Most Variable Genes"
+)
+
+
+```
+
+```{r scaling-on-resampled}
+# ------- Scale resampled train/test -----------
+# X_train_resampled and X_test_resampled already exist
+# 1. Scale training predictors
+X_train_scaled <- scale(X_train_resampled)
+# 2. Save the centering & scaling attributes
+train_center <- attr(X_train_scaled, "scaled:center")
+train_scale  <- attr(X_train_scaled, "scaled:scale")
+
+# 3. Apply the same transform to test predictors
+X_test_scaled <- scale(
+  X_test_resampled,
+  center = train_center,
+  scale  = train_scale
+)
+
+# 4. Turn them into data.frames (if you want)
+X_train_scaled <- as.data.frame(X_train_scaled)
+X_test_scaled  <- as.data.frame(X_test_scaled)
+
+# Quick QC
+cat("Train means (should be ~0):", round(colMeans(X_train_scaled)[1:5], 3), "\n")
+cat("Test means (not exactly 0):", round(colMeans(X_test_scaled)[1:5], 3), "\n")
+
+```
+
+```{r label-distribution-faceted, fig.width=10, fig.height=4}
+library(ggplot2)
+library(dplyr)
+
+# 1. Count class frequencies per set (using the resampled labels)
+train_df <- data.frame(Set = "Train", Label = y_train_resampled)
+test_df  <- data.frame(Set = "Test",  Label = y_test_resampled)
+combined_df <- bind_rows(train_df, test_df)
+
+# 2. Create histogram‐style bar plots for each set
+ggplot(combined_df, aes(x = Label)) +
+  geom_bar(fill = "#3E92CC") +
+  facet_wrap(~ Set, nrow = 1, scales = "free_y") +
+  labs(
+    title = "Label Distribution After Upsampling: Train vs Test",
+    x = "Class Label",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 14))
+```
+
+
+```{r PCA}
+#Run PCA on the SCALED, RESAMPLED training set
+pca_result <- prcomp(
+  X_train_scaled,   # scaled & resampled train features
+  center = TRUE,    # these are redundant when you already scaled, but safe
+  scale. = TRUE
+)
+
+# Capture how much variance each PC explains
+explained_var <- pca_result$sdev^2
+prop_var      <- explained_var / sum(explained_var)
+cum_var       <- cumsum(prop_var)
+num_pc_95     <- which(cum_var >= 0.95)[1]
+cat("Number of PCs to capture 95% variance:", num_pc_95, "\n")
+
+# Build PCA train & test matrices
+# Training scores:
+X_pca_train <- as.data.frame(pca_result$x[, 1:num_pc_95])
+
+# Scale your test set exactly the same way *before* projecting:
+test_scaled <- scale(
+  X_test_scaled,                   # your already scaled test data
+  center = pca_result$center,      # prcomp’s internal center (mean)
+  scale  = pca_result$scale        # prcomp’s internal scale (sd)
+)
+
+# Project onto the first num_pc_95 PCs:
+X_pca_test_manual <- test_scaled %*% pca_result$rotation[, 1:num_pc_95]
+
+# Turn into data frame and name columns:
+df_pca_test <- as.data.frame(X_pca_test_manual)
+colnames(df_pca_test) <- paste0("PC", 1:ncol(df_pca_test))
+
+# Attach the resampled test labels:
+df_pca_test$target <- y_test_resampled
+
+
+###############################
+
+################################
+# Now df_pca_test is a ready‐to‐use test set with PCA features + label
+str(df_pca_test)
+head(df_pca_test)
+
+# Step 4: Create cumulative variance plot
+scree_data <- data.frame(
+  PC = 1:length(prop_var),
+  CumulativeVariance = cum_var
+)
+
+ggplot(scree_data, aes(x = PC, y = CumulativeVariance)) +
+  geom_line(color = "blue") +
+  geom_point() +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = num_pc_95, linetype = "dotted", color = "darkgreen") +
+  theme_minimal() +
+  labs(
+    title = "Cumulative Variance Explained by PCA",
+    x = "Number of Principal Components",
+    y = "Cumulative Proportion of Variance Explained"
+  )
+
+##########################bar plot
+# Step 1: Variance calculations
+explained_var <- pca_result$sdev^2
+prop_var <- explained_var / sum(explained_var)
+cum_var <- cumsum(prop_var)
+
+# Step 2: Create a data frame for plotting
+scree_data <- data.frame(
+  PC = factor(paste0("PC", 1:length(prop_var)), levels = paste0("PC", 1:length(prop_var))),
+  VarianceExplained = prop_var,
+  CumulativeVariance = cum_var
+)
+
+# Step 3: Bar plot (first126 PCs for clarity)
+ggplot(scree_data[1:126, ], aes(x = PC, y = VarianceExplained)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "green") +
+  theme_minimal() +
+  labs(
+    title = "Scree Plot (Bar) with Cumulative Variance Line",
+    x = "Principal Components",
+    y = "Proportion of Variance Explained"
+  ) +
+ scale_y_continuous(limits = c(0, 0.125)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Option 2: just get number of total PCs
+ncol(pca_result$x)
+
+# Project original data onto the top components
+pca_95_data <- as.data.frame(pca_result$x[, 1:num_pc_95])
+
+# Add back the labels
+pca_95_data$target <- y_train_resampled  # Labels from upsampled data
+```
+
+```{r model-comparison-on-pca, message=FALSE}
+library(caret)
+library(e1071)
+library(randomForest)
+library(rpart)
+library(kknn)
+
+# 1. Extract features and target from PCA data
+X_pca <- pca_95_data[, -ncol(pca_95_data)]  # all PC columns
+y_pca <- pca_95_data$target                 # target labels
+
+# 2. Define 5-fold CV
+ctrl <- trainControl(method = "cv", number = 5)
+
+# 3. Train models using PCA data
+set.seed(42)
+model_results_pca <- list()
+
+model_results_pca[["Logistic Regression"]] <- train(
+  x = X_pca, y = y_pca,
+  method = "multinom",
+  trControl = ctrl,
+  trace = FALSE
+)
+
+model_results_pca[["SVM"]] <- train(
+  x = X_pca, y = y_pca,
+  method = "svmLinear",
+  trControl = ctrl
+)
+
+model_results_pca[["Decision Tree"]] <- train(
+  x = X_pca, y = y_pca,
+  method = "rpart",
+  trControl = ctrl
+)
+
+model_results_pca[["Random Forest"]] <- train(
+  x = X_pca, y = y_pca,
+  method = "rf",
+  trControl = ctrl
+)
+
+model_results_pca[["KNN"]] <- train(
+  x = X_pca, y = y_pca,
+  method = "knn",
+  trControl = ctrl,
+  tuneLength = 5
+)
+
+# 4. Compare PCA-based model accuracy
+model_accuracies_pca <- sapply(model_results_pca, function(m) max(m$results$Accuracy))
+print(model_accuracies_pca)
+```
+
+```{r plot-pca-model-accuracies, message=FALSE}
+library(ggplot2)
+
+# Create a named data frame from your accuracy results
+model_accuracies_pca <- c(
+  "Logistic Regression" = 0.8937179,
+  "SVM" = 0.7371795 ,
+  "Decision Tree" = 0.8182833,
+  "Random Forest" = 0.9544482,
+  "KNN" = 0.7616273
+)
+
+accuracy_df <- data.frame(
+  Model = names(model_accuracies_pca),
+  Accuracy = as.numeric(model_accuracies_pca)
+)
+
+# Plot
+ggplot(accuracy_df, aes(x = reorder(Model, -Accuracy), y = Accuracy)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = round(Accuracy, 3)), vjust = -0.5, size = 4) +
+  ylim(0, 1) +
+  theme_minimal() +
+  labs(
+    title = "Model Accuracy on PCA-Transformed Data",
+    x = "Model",
+    y = "Cross-Validated Accuracy"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r random forest}
+library(yardstick)
+library(dplyr)
+library(pROC)
+
+# Get predicted class labels and true labels
+rf_preds <- predict(model_results_pca[["Random Forest"]], X_pca)
+true_labels <- y_pca
+
+# Convert to data frame for yardstick
+eval_df <- data.frame(
+  truth = true_labels,
+  prediction = rf_preds
+)
+
+# F1 (macro-averaged)
+f1_macro <- eval_df %>%
+  yardstick::f_meas(truth = truth, estimate = prediction, beta = 1)
+
+# F2 (macro-averaged)
+f2_macro <- eval_df %>%
+  yardstick::f_meas(truth = truth, estimate = prediction, beta = 2)
+
+print(f1_macro)
+print(f2_macro)
+
+# Predict probabilities
+rf_probs <- predict(model_results_pca[["Random Forest"]], X_pca, type = "prob")
+
+# Use pROC's multiclass AUC
+library(pROC)
+roc_multiclass <- multiclass.roc(response = true_labels, predictor = as.matrix(rf_probs))
+auc_value <- auc(roc_multiclass)
+print(auc_value)
+```
+
+```{r plot-roc-facets, message=FALSE}
+library(pROC)
+library(ggplot2)
+
+# 1. Get true labels and predicted probabilities
+true_labels <- y_pca
+rf_probs <- predict(model_results_pca[["Random Forest"]], X_pca, type = "prob")
+class_levels <- colnames(rf_probs)
+
+# 2. Compute one-vs-rest ROC for each class
+roc_df <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true_labels == class)
+  roc_obj <- roc(binary_response, rf_probs[[class]], quiet = TRUE)
+  
+  data.frame(
+  fpr = 1 - roc_obj$specificities,
+  tpr = roc_obj$sensitivities,
+  class = class,
+  auc = rep(auc(roc_obj), length(roc_obj$sensitivities))
+)
+
+}))
+
+# 3. Plot with facets
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "One-vs-Rest ROC Curves for Each Class",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+```
+
+```{r confusion matrix}
+# Get predictions on PCA data
+rf_preds <- predict(model_results_pca[["Random Forest"]], X_pca)
+library(caret)
+
+# 1. Predict on PCA-transformed training data
+rf_preds <- predict(model_results_pca[["Random Forest"]], X_pca)
+
+# 2. Generate confusion matrix
+conf_matrix <- confusionMatrix(rf_preds, y_pca)
+
+# 3. View class-wise performance
+metrics_per_class <- conf_matrix$byClass
+print(metrics_per_class)
+```
+
+```{r random forest on testing}
+library(randomForest)
+library(caret)
+
+# 1. Train RF on the PCA‐scores of your resampled training set
+set.seed(42)
+rf_model <- randomForest(
+  x = X_pca_train,
+  y = y_train_resampled
+)
+
+# 2. Get predictions on both train and test
+train_preds <- predict(rf_model, newdata = X_pca_train)
+test_preds  <- predict(rf_model, newdata = df_pca_test[, grep("^PC", names(df_pca_test))])
+
+# 3. Evaluate with confusion matrices
+cat("\n--- Training Set Performance ---\n")
+print(confusionMatrix(train_preds, y_train_resampled))
+
+cat("\n--- Testing Set Performance ---\n")
+print(confusionMatrix(test_preds, y_test_resampled))
+```
+
+
+```{r AUC_ROC_on_resampled_test}
+library(pROC)
+library(yardstick)
+library(dplyr)
+library(ggplot2)
+
+# --- Predict class probabilities on the resampled PCA test set ---
+rf_probs_test <- predict(
+  rf_model,
+  newdata = df_pca_test[, grep("^PC", names(df_pca_test))],
+  type    = "prob"
+)
+true_labels_test <- y_test_resampled
+
+class_levels <- colnames(rf_probs_test)
+
+# --- AUC ROC Computation ---
+roc_df_test <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true_labels_test == class)
+  roc_obj <- roc(binary_response, rf_probs_test[, class], quiet = TRUE)
+
+  data.frame(
+    fpr   = 1 - roc_obj$specificities,
+    tpr   = roc_obj$sensitivities,
+    class = class,
+    auc   = rep(round(auc(roc_obj), 3), length(roc_obj$sensitivities))
+  )
+}))
+
+# --- ROC PLOT ---
+ggplot(roc_df_test, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Test Set: One-vs-Rest ROC Curves",
+    x     = "False Positive Rate",
+    y     = "True Positive Rate"
+  )
+```
