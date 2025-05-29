@@ -9,6 +9,7 @@ author: "Jovin Louie"
 library(tidyverse)
 library(ggplot2)
 library(scales)
+library(patchwork)
 ```
 
 ```{r}
@@ -81,6 +82,29 @@ ggplot(expression_df, aes(x = Expression)) +
 ```
 
 ```{r}
+ggplot(expression_df, aes(x = Expression)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black", alpha = 0.5) +
+  geom_line(
+    stat = "bin",
+    bins = 100,
+    aes(y = ..count..),
+    color = "red",
+    size = 1,
+    alpha = 0.75
+  ) +
+  labs(title = "Distribution of All Gene Expression Values",
+       x = "Expression Level", y = "Frequency") +
+  scale_x_continuous(breaks = seq(0, 20, by = 1)) +
+  scale_y_continuous(
+    labels = scales::label_comma(),
+    breaks = seq(0, 500000, by = 50000)
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
 # Prepare data: expression as y-axis
 expression_df = tibble(Expression = unlist(data[ , -(1:2)], use.names = FALSE))
 
@@ -89,8 +113,24 @@ expression_df$Group = "All Genes"
 
 ggplot(expression_df, aes(y = Group, x = Expression)) +
   geom_boxplot(fill = "skyblue") +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, color = "red") +
   labs(title = "Overall Distribution of Gene Expression Values",
-       y = "", x = "Expression Level")
+       y = "", x = "Expression Level") +
+  scale_x_continuous(breaks = seq(0, 20, by = 1))
+```
+
+```{r}
+# Basic statistics
+mean_val <- mean(expression_df$Expression)
+median_val <- median(expression_df$Expression)
+quantiles <- quantile(expression_df$Expression, probs = c(0.25, 0.75))
+
+# Print results
+cat("Mean Expression Level: ", mean_val, "\n")
+cat("Median Expression Level: ", median_val, "\n")
+cat("1st Quartile (Q1): ", quantiles[1], "\n")
+cat("3rd Quartile (Q3): ", quantiles[2], "\n")
+cat("Interquartile Range (IQR): ", IQR(expression_df$Expression), "\n")
 ```
 
 
@@ -126,6 +166,7 @@ ggplot(plot_data, aes(x = factor(samples), y = Expression)) +
   geom_boxplot(outlier.size = 0.5, fill = "lightgreen") +
   labs(title = "Expression Distribution per Sample (Subset)",
        x = "Sample ID", y = "Expression Level") +
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
   theme_minimal()
 ```
 
@@ -190,3 +231,46 @@ ggplot(sample_summary, aes(y = Type, x = Mean)) +
        x = "Expression Level") +
   theme_minimal()
 ```
+
+```{r}
+type_counts <- data %>%
+  count(type) %>%
+  mutate(Percentage = n / sum(n) * 100)
+
+ggplot(type_counts, aes(x = type, y = n, fill = type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sample Count by Cancer Type", x = "Cancer Type", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Pie chart of class proportions
+ggplot(type_counts, aes(x = "", y = Percentage, fill = type)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  labs(title = "Cancer Type Distribution (Pie Chart)") +
+  theme_void() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")),
+            position = position_stack(vjust = 0.5), color = "white", size = 4)
+```
+
+```{r}
+# Bar plot
+bar_plot <- ggplot(type_counts, aes(x = type, y = n, fill = type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sample Count by Cancer Type", x = "Cancer Type", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Pie chart
+pie_chart <- ggplot(type_counts, aes(x = "", y = Percentage, fill = type)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  labs(title = "Cancer Type Distribution (Pie Chart)") +
+  theme_void() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")),
+            position = position_stack(vjust = 0.5), color = "white", size = 4)
+
+# Combine side by side
+bar_plot + pie_chart
+```
+
