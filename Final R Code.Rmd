@@ -1,0 +1,1040 @@
+---
+title: "STA 141C R Code"
+author: "Jenny Xu"
+date: "2025-05-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(pheatmap)
+library(caret)
+library(glmnet)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(class)
+library(MLmetrics)
+library(yardstick)
+library(dplyr)
+library(pROC)
+library(scales)
+```
+
+# Exploratory Data Analysis
+```{r}
+# Exploratory Data Analysis
+# Read data
+data = read.csv("Breast_GSE45827.csv")
+
+# View shape and basic structure of the dataset
+dim(data)
+head(data[,1:10])
+
+# Check the unique values and levels of outcome variable
+table(data$type)
+unique(data$type)
+
+# Check missing values -- there's no missing values in our dataset
+sum(is.na(data))
+```
+
+## Dataset Composition
+```{r}
+# Dataset Composition
+# Count per class
+type_counts <- data %>%
+  count(type) %>%
+  mutate(Percentage = n / sum(n) * 100)
+
+# Bar plot of class counts
+bar_plot <- ggplot(type_counts, aes(x = type, y = n, fill = type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sample Count by Class", x = "Cancer Subtype", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Pie chart of class proportions
+pie_plot <- ggplot(type_counts, aes(x = "", y = Percentage, fill = type)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y") +
+  labs(title = "Class Distribution (Pie Chart)") +
+  theme_void() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")),
+            position = position_stack(vjust = 0.5), color = "white", size = 4)
+
+# Combine the two plots using gridExtra
+library(gridExtra)
+grid.arrange(bar_plot, pie_plot, ncol = 2)
+
+```
+
+## Descriptive Statistics by Gene
+```{r}
+# Descriptive Statistics by Gene
+# remove first 2 columns (samples and types)
+gene_data = data[, -(1:2)]
+
+gene_summary = tibble(
+  Gene = colnames(gene_data),
+  Mean = colMeans(gene_data, na.rm = TRUE),
+  Median = apply(gene_data, 2, median, na.rm = TRUE),
+  SD = apply(gene_data, 2, sd, na.rm = TRUE),
+  Min = apply(gene_data, 2, min, na.rm = TRUE),
+  Max = apply(gene_data, 2, max, na.rm = TRUE),
+)
+
+head(gene_summary)
+```
+
+## Descriptive Statistics by Sample
+```{r}
+# Compute summary statistics per row (i.e., per sample)
+sample_summary <- tibble(
+  SampleID = data$samples,
+  Type     = data$type,
+  Mean     = apply(gene_data, 1, mean, na.rm = TRUE),
+  Median   = apply(gene_data, 1, median, na.rm = TRUE),
+  SD       = apply(gene_data, 1, sd, na.rm = TRUE),
+  Min      = apply(gene_data, 1, min, na.rm = TRUE),
+  Max      = apply(gene_data, 1, max, na.rm = TRUE)
+)
+
+# Preview the result
+head(sample_summary)
+```
+
+## Descriptive Statistics by Breast Cancer Subtype
+```{r}
+# Pivot to long format
+data_long = data %>%
+  pivot_longer(cols = -(samples:type), names_to = "Gene", values_to = "Expression")
+
+# Compute stats by class and gene
+grouped_summary = data_long %>%
+  group_by(type, Gene) %>%
+  summarise(
+    Mean = mean(Expression, na.rm = TRUE),
+    Median = median(Expression, na.rm = TRUE),
+    SD = sd(Expression, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Preview
+head(grouped_summary)
+```
+
+## Overall Descriptive Statistics
+```{r}
+# Overall Descriptive Statistics 
+# Flatten to a vector
+all_values = unlist(gene_data, use.names = FALSE)
+
+overall_summary = tibble(
+  # Gene = colnames(gene_data),
+  Mean = mean(all_values, na.rm = TRUE),
+  Median = median(all_values, na.rm = TRUE),
+  SD = sd(all_values, na.rm = TRUE),
+  Min = min(all_values, na.rm = TRUE),
+  Max = max(all_values, na.rm = TRUE),
+)
+
+head(overall_summary)
+
+print(paste("Mean:", overall_summary$Mean))
+print(paste("Median:", overall_summary$Median))
+print(paste("Standard Deviation:", overall_summary$SD))
+print(paste("Min:", overall_summary$Min))
+print(paste("Max:", overall_summary$Max))
+```
+## Max/Min of Mean Gene Expression
+```{r}
+# Sample with highest mean expression
+max_mean_sample <- sample_summary %>%
+  filter(Mean == max(Mean, na.rm = TRUE))
+
+# Sample with lowest mean expression
+min_mean_sample <- sample_summary %>%
+  filter(Mean == min(Mean, na.rm = TRUE))
+
+# Print results
+cat("Sample with MAX mean expression:\n")
+print(max_mean_sample)
+
+cat("\nSample with MIN mean expression:\n")
+print(min_mean_sample)
+```
+
+## Max/Min of Absolute Gene Expression
+```{r}
+# Sample with highest expression
+max_sample <- sample_summary %>%
+  filter(Max == max(Max, na.rm = TRUE))
+
+# Sample with lowest expression
+min_sample <- sample_summary %>%
+  filter(Min == min(Min, na.rm = TRUE))
+
+# Print results
+cat("Sample with MAX mean expression:\n")
+print(min_sample)
+
+cat("\nSample with MIN mean expression:\n")
+print(max_sample)
+```
+
+## Frequency distribution of Gene Expression - Why we need normalization/scaling
+```{r}
+# Distribution of Gene Expression - Why we need normalization/scaling
+all_values = unlist(gene_data, use.names = FALSE)
+expression_df = tibble(Expression = all_values)
+
+ggplot(expression_df, aes(x = Expression)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black", alpha = 0.5) +
+  geom_line(
+    stat = "bin",
+    bins = 100,
+    aes(y = ..count..),
+    color = "red",
+    size = 1,
+    alpha = 0.75
+  ) +
+  labs(title = "Distribution of All Gene Expression Values",
+       x = "Expression Level", y = "Frequency") +
+  scale_x_continuous(breaks = seq(0, 20, by = 1)) +
+  scale_y_continuous(
+    labels = scales::label_comma(),
+    breaks = seq(0, 500000, by = 50000)
+  ) +
+  theme_minimal()
+
+```
+
+## Boxplot of Gene Expression - Why we need normalization/scaling
+```{r}
+# Boxplot of Gene Expression - Why we need normalization/scaling
+# Prepare data: expression as y-axis
+expression_df = tibble(Expression = unlist(data[ , -(1:2)], use.names = FALSE))
+
+# Add dummy variable for plotting
+expression_df$Group = "All Genes"
+
+ggplot(expression_df, aes(y = Group, x = Expression)) +
+  geom_boxplot(fill = "skyblue") +
+  labs(title = "Overall Distribution of Gene Expression Values",
+       y = "", x = "Expression Level")
+```
+
+## Boxplot of Gene Expression by Sample
+```{r}
+set.seed(123)
+# Boxplot for a few random samples to keep it readable
+sample_subset = sample(unique(data_long$samples), 25)
+plot_data = data_long %>% filter(samples %in% sample_subset)
+
+# plot_data = data_long %>% filter(samples %in% data_long$samples)
+
+ggplot(plot_data, aes(x = factor(samples), y = Expression)) +
+  geom_boxplot(outlier.size = 0.5, fill = "lightgreen") +
+  labs(title = "Expression Distribution per Sample (Subset)",
+       x = "Sample ID", y = "Expression Level") +
+  theme_minimal()
+```
+
+## Boxplot of Gene Expression by Cancer Type
+```{r}
+ggplot(sample_summary, aes(y = Type, x = Mean)) +
+  geom_boxplot(fill = "lightgreen") +
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, color = "red") +
+  labs(title = "Distribution of Sample Means by Cancer Type",
+       x = "Expression Level") +
+  theme_minimal()
+```
+
+## Top 10 Variable Genes - Do their gene expression differ by cancer subtype?
+```{r}
+gene.variances = apply(gene_data, 2, var)
+top.genes = sort(gene.variances, decreasing = TRUE)
+top.10.genes.name = names(top.genes)[1:10]
+
+# Create a long-format dataframe for plotting
+plot_data = lapply(top.10.genes.name, function(gene) {
+  data.frame(
+    Gene = gene,
+    Expression = gene_data[[gene]],
+    Subtype = data$type
+  )
+}) %>% bind_rows()
+
+# Create combined boxplot
+ggplot(plot_data, aes(x = Subtype, y = Expression, fill = Subtype)) +
+  geom_boxplot(outlier.size = 0.5) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  labs(title = "Top 10 Most Variable Genes: Expression by Subtype",
+       x = "Cancer Subtype",
+       y = "Gene Expression") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# Anova table
+anova_results <- lapply(top.10.genes.name, function(gene) {
+  model <- aov(gene_data[[gene]] ~ data$type)
+  summary_df <- summary(model)[[1]]
+  data.frame(
+    Gene = gene,
+    F_value = summary_df[["F value"]][1],
+    p_value = summary_df[["Pr(>F)"]][1]
+  )
+}) %>% bind_rows()
+
+# Print to console
+print(anova_results)
+
+
+# for (gene in top.10.genes.name){
+#   # New data frame
+#   data.plot = data.frame(
+#     expression = gene_data[[gene]],
+#     subtype = data$type
+#   )
+#   
+#   # Boxplot of how gene expression differ by subtype for highly variable gene
+#   print(
+#     ggplot(data.plot, aes(x = subtype, y = expression, fill = subtype)) +
+#       geom_boxplot() +
+#       labs(title = paste("Expression of", gene, "by Subtype"),
+#            x = "Subtype",
+#            y = "Expression Level")
+#   )
+#   # One-way ANOVA for one top gene
+#   print(summary(aov(expression~subtype, data = data.plot)))
+# }
+```
+
+## PCA Plot - Sample Cluster by Cancer Subtype
+```{r}
+# PCA plot -- samples cluster by cancer subtype
+# Standardize all genes (mean 0, sd 1)
+scaled.data = scale(gene_data)
+# PCA
+pca.result = prcomp(scaled.data)
+pca.plot = data.frame(
+  PC1 = pca.result$x[,1],
+  PC2 = pca.result$x[,2],
+  Subtype = data$type
+)
+ggplot(pca.plot, aes(x = PC1, y = PC2, color = Subtype)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of Gene Expression (Scaled)", x = "PC1", y = "PC2")
+```
+
+## Heatmap - Sample Cluster by Subtype
+```{r}
+# Heatmap of 10 top variable genes
+top.10.expression = gene_data[,top.10.genes.name]
+top.10.scaled = scale(top.10.expression)
+rownames(top.10.scaled) = rownames(data)
+row.annotation = data.frame(Subtype = data$type)
+rownames(row.annotation) = rownames(top.10.scaled)
+
+pheatmap(top.10.scaled,
+         annotation_row = row.annotation,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Heatmap of Top 10 Variable Genes")
+```
+
+# Methodology
+## Data Pre-processing 
+```{r}
+# Methodology (Pre-processing steps)
+# Step 1: Split into Training and Test sets
+set.seed(141)
+idx <- createDataPartition(data$type, p = 0.80, list = FALSE)
+train.data <- data[idx, ]
+test.data  <- data[-idx, ]
+
+table(test.data$type)
+
+# Step 2: Extract gene expression matrix and subtype labels
+x.train.raw = train.data[,-(1:2)]
+y.train = train.data$type
+x.test.raw = test.data[,-(1:2)]
+y.test = test.data$type
+
+# Step 3: Scale training data only and test data using training parameters
+scaled.train = scale(x.train.raw)
+train.center = attr(scaled.train, "scaled:center")
+train.scale = attr(scaled.train, "scaled:scale")
+scaled.test = scale(x.test.raw,
+                    center = train.center,
+                    scale = train.scale)
+
+# Step 4: Handle class imbalance by upsampling scaled training data
+y.train = factor(train.data$type)
+
+train.upsampled = upSample(
+  x = as.data.frame(scaled.train),
+  y = y.train,
+  yname = "target"
+)
+
+x.train.resampled = train.upsampled[, -ncol(train.upsampled)]
+y.train.resampled = train.upsampled$target
+```
+
+### 80% Training vs. 20% Test Split (Before Upsampling)
+```{r}
+# Before upsamping, 80% Train set vs. 20% Test set
+# build a tiny data frame
+n_train = length(y.train)
+n_test = length(y.test)
+df <- data.frame(
+  Set   = factor(c("Train","Test"), levels = c("Train","Test")),
+  Count = c(n_train, n_test)
+)
+
+# plot
+ggplot(df, aes(x = Set, y = Count, fill = Set)) +
+  geom_col(width = 0.6) +               # geom_col is the same as geom_bar(stat="identity")
+  labs(title = "Train vs Test Set Sizes",
+       x     = NULL,
+       y     = "Number of samples") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Unbalanced vs. Balanced Class (After Upsampling)
+```{r}
+# After upsampling, balanced class in training set
+# train.upsampled$target is the factor of up‐sampled labels
+table(train.upsampled$target)
+# class counts in your up-sampled test set
+table(y.train.resampled)
+table(test.data$type)
+
+```
+
+## PCA
+```{r}
+# Methodology (PCA)
+# Step 1: Apply PCA to scaled training data
+pca.model = prcomp(x.train.resampled, center = FALSE, scale. = FALSE)
+
+# Step 2: Examine variance explained by each component
+explained.variance = pca.model$sdev^2
+proportion.variance = explained.variance/sum(explained.variance)
+cumulative.variance = cumsum(proportion.variance)
+
+# Step 3: Find number of PCs that explain more than 95% of variance
+num.pc.95 = which(cumulative.variance >= 0.95)[1]
+
+# Step 4: Create PCA-transformed training data
+pca.train = as.data.frame(pca.model$x[,1:num.pc.95])
+pca.train$Subtype = y.train.resampled
+
+# Step 5: Apply same PCA to test data
+pca.test.raw = predict(pca.model, newdata = scaled.test)
+pca.test = as.data.frame(pca.test.raw[,1:num.pc.95])
+
+# Step 6: Scree plot: proportion of variance
+plot(explained.variance[1:50], type = "b",
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     main = "PCA Scree Plot (Top 50 PCs)")
+
+# Step 7: Cumulative variance plot
+scree.data = data.frame(
+  PC = 1:length(cumulative.variance),
+  CumulativeVariance = cumulative.variance
+)
+
+ggplot(scree.data, aes(x = PC, y = CumulativeVariance)) +
+  geom_line(color = "blue") +
+  geom_point() +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = num.pc.95, linetype = "dotted", color = "darkgreen") +
+  theme_minimal() +
+  labs(
+    title = "Cumulative Variance Explained by PCA",
+    x = "Number of Principal Components",
+    y = "Cumulative Proportion of Variance Explained"
+  )
+
+# What cumulative variance do those PCs explain?
+cat("Cumulative variance at PC", num.pc.95, ":", 
+    round(cumulative.variance[num.pc.95], 4), "\n")
+
+```
+
+## Lasso
+```{r}
+# Methodology (Lasso)
+# Step 1: Prepare training and test data in matrix form
+x.lasso.train = as.matrix(pca.train[,-ncol(pca.train)])
+y.lasso.train = pca.train$Subtype
+
+x.lasso.test = as.matrix(pca.test)
+
+# Step 2: Fit Lasso Model
+lasso.model = glmnet(x.lasso.train, y.lasso.train, 
+                     alpha = 1, family = "multinomial")
+
+# Step 3: Use Cross-validation to find optimal lambda
+set.seed(141)
+cv.lasso = cv.glmnet(x.lasso.train, y.lasso.train, 
+                     alpha = 1,family = "multinomial")
+plot(cv.lasso)
+best.lambda = cv.lasso$lambda.min
+
+# Step 4: Predict on test data
+lasso.pred = predict(cv.lasso, newx = x.lasso.test, 
+                    s = best.lambda, type = "class")
+
+# Step 5: Evaluate Model Performance
+table(Predicted = lasso.pred, Actual = test.data$type)
+lasso.accruacy = mean(lasso.pred == test.data$type)
+lasso.accruacy
+
+
+```
+### Which gene is most predictive for each breast cancer subtype using Lasso?
+```{r}
+# Which gene is most predictive for each breast cancer subtype using Lasso?
+# No scaling of raw data, just upsampling to avoid bias
+# Step 1: Upsample raw data
+set.seed(141)
+train.raw.upsampled = upSample(
+  x = x.train.raw,
+  y = factor(y.train),
+  yname = "target"
+)
+
+# Step 2: Prepare training and test data for Lasso
+x.raw.lasso.train = as.matrix(train.raw.upsampled[, -ncol(train.raw.upsampled)])
+y.raw.lasso.train = train.raw.upsampled$target
+
+# Step 3: Fit lasso on raw gene data
+lasso.raw.model = glmnet(x.raw.lasso.train, y.raw.lasso.train,
+                         alpha = 1, family = "multinomial")
+
+# Step 4: Cross-validation for lambda
+cv.raw.lasso = cv.glmnet(x.raw.lasso.train, y.raw.lasso.train,
+                         alpha = 1, family = "multinomial")
+best.raw.lambda = cv.raw.lasso$lambda.min
+
+# Step 5: Extract coefficients at best lambda
+coef.raw = coef(cv.raw.lasso, s = best.raw.lambda)
+
+# Step 6: Find top predictive genes per subtype
+top.genes.by.subtype = list()
+
+for (subtype in names(coef.raw)){
+  coef.matrix = coef.raw[[subtype]]
+  nonzero.idx = which(coef.matrix !=0)[-1]
+  
+  if (length(nonzero.idx) >0){
+    gene.name = rownames(coef.matrix)[nonzero.idx]
+    abs.coef = abs(as.vector(coef.matrix[nonzero.idx]))
+    names(abs.coef) = gene.name
+    
+    top.genes = sort(abs.coef, decreasing = TRUE)
+    top.genes.by.subtype[[subtype]] = top.genes
+  }else{
+    top.genes.by.subtype[[subtype]] = NULL
+    }
+}
+
+top.genes.by.subtype
+```
+
+## SVM
+```{r}
+# Methodology (SVM)
+# Step 1: Prepare training and test data from PCA transformed data
+x.svm.train = as.matrix(pca.train[, -ncol(pca.train)])
+y.svm.train = pca.train$Subtype
+
+x.svm.test = as.matrix(pca.test)
+
+# Step 2: Train SVM Model
+set.seed(141)
+svm.model = svm(
+  x = x.svm.train,
+  y = y.svm.train,
+  kernel = "linear",
+  probability = TRUE
+)
+
+# Step 3: Predict on Test data
+svm.pred = predict(svm.model, newdata = x.svm.test)
+
+# Step 4: Evaluate Accruacy
+table(Predicted = svm.pred, Actual = test.data$type)
+svm.accruacy = mean(svm.pred == test.data$type)
+svm.accruacy
+```
+
+## Decision Tree
+```{r}
+# Methodology (Decision Tree)
+# Step 1: Prepare training and test data from PCA transformed data
+tree.train.data = pca.train
+tree.test.data = pca.test
+
+# Step 3: Fit tree model
+tree.model = rpart(Subtype~., data = tree.train.data, method = "class")
+
+# Step 4: Predict on test data
+tree.pred = predict(tree.model, newdata = tree.test.data, type = "class")
+
+# Step 5: Confusion matrix + accuracy
+table(Predicted = tree.pred, Actual = test.data$type)
+tree.accruacy = mean(tree.pred == test.data$type)
+tree.accruacy
+
+# Step 6: Visualize the tree
+rpart.plot(tree.model, main = "Decision Tree on PCA Data")
+```
+
+## Random Forest
+```{r}
+# Methodology (Random Forest)
+# Step 1: Prepare training and test data from PCA transformed data
+rf.train.data = pca.train
+rf.test.data = pca.test
+
+# Step 3: Fit random forest model
+set.seed(123)
+rf.model = randomForest(Subtype~., data = rf.train.data, ntree = 500)
+
+# Step 4: Predict on Test data
+rf.pred = predict(rf.model, newdata = rf.test.data)
+
+# Step 5: Confusion matrix + accuracy
+table(Predicted = rf.pred, Actual = test.data$type)
+rf.accuracy = mean(rf.pred == test.data$type)
+rf.accuracy
+```
+
+## KNN
+```{r}
+# Methodology (KNN)
+# Step 1: Prepare training and test data from PCA transformed data
+x.knn.train = as.matrix(pca.train[, -ncol(pca.train)])
+y.knn.train = pca.train$Subtype
+
+x.knn.test = as.matrix(pca.test)
+
+# Step 2: fit KNN model (manually choose k)
+set.seed(141)
+knn.pred = knn(train = x.knn.train, test = x.knn.test,
+               cl = y.knn.train, k = 5)
+
+# Step 3: Confusion matrix + accuracy
+table(Predicted = knn.pred, Actual = test.data$type)
+knn.accuracy = mean(knn.pred == test.data$type)
+knn.accuracy
+```
+
+# Main Results 
+## Accuracy
+```{r}
+# Main Results (Model Comparison using Caret pacakage)
+# Step 1: Extract features and target from PCA data
+x.pca = pca.train[, -ncol(pca.train)]
+y.pca = pca.train$Subtype
+
+# Step 2: Define 5-fold CV and upsamling
+ctrl <- trainControl(
+  method   = "cv",
+  number   = 5,
+  sampling = "up"       # <-- this makes caret up-sample the minority classes in each fold
+)
+
+model.results.pca = list()
+
+set.seed(141)
+model.results.pca[["Random Forest"]] <- train(
+  x         = x.pca,
+  y         = y.pca,
+  method    = "rf",
+  trControl = ctrl
+)
+
+
+# Step 3: Train models using PCA data
+set.seed(141)
+model.results.pca = list()
+
+model.results.pca[["Lasso"]] = train(
+  x = x.pca, y = y.pca,
+  method = "glmnet",
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+model.results.pca[["SVM"]] = train(
+  x = x.pca, y =y.pca,
+  method = "svmLinear",
+  trControl = ctrl
+)
+
+model.results.pca[["Decision Tree"]] = train(
+  x = x.pca,y =y.pca,
+  method = "rpart",
+  trControl = ctrl
+)
+
+model.results.pca[["Random Forest"]] = train(
+  x = x.pca,y =y.pca,
+  method = "rf",
+  trControl = ctrl
+)
+
+model.results.pca[["KNN"]] = train(
+  x = x.pca,y =y.pca,
+  method = "knn",
+  trControl = ctrl,
+  tuneLength = 5
+)
+
+# Step 4: Compare PCA-based model accuracy
+model.accuracies.pca = sapply(model.results.pca, 
+                              function(m) max(m$results$Accuracy))
+model.accuracies.pca
+
+# Step 5: Plot
+# Extract cross-validated accuracy from each caret model
+model.accuracies.pca <- sapply(model.results.pca, function(m) {
+  if ("Accuracy" %in% colnames(m$results)) {
+    max(m$results$Accuracy)
+  } else {
+    NA  # Handle models like SVM (if probs or tuning failed)
+  }
+})
+
+# Create data frame
+accuracy_df <- data.frame(
+  Model = names(model.accuracies.pca),
+  Accuracy = as.numeric(model.accuracies.pca)
+)
+
+ggplot(accuracy_df, aes(x = reorder(Model, -Accuracy), y = Accuracy)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = round(Accuracy, 3)), vjust = -0.5, size = 4) +
+  ylim(0, 1) +
+  theme_minimal() +
+  labs(
+    title = "Model Accuracy on PCA-Transformed Data",
+    x = "Model",
+    y = "Cross-Validated Accuracy"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## F1 & F2 & ROC Curve/AUC Score
+### Random Forest
+```{r}
+# Main Results (Model Evaluation: Random Forest)
+# Step 1: Store predicted labels and true test labels
+true.label = factor(test.data$type)
+rf.prediction = predict(model.results.pca[["Random Forest"]], pca.test)
+
+# Step 2: Create dataframe for evaluation
+evaluate.data = data.frame(
+  truth = true.label,
+  prediction = factor(rf.prediction, levels = levels(true.label))
+)
+
+# Step 3: F1
+f1.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 1)
+
+# Step 4: F2
+f2.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 2)
+
+# Step 5: Probabilities for AUC
+rf.probs = predict(model.results.pca[["Random Forest"]], pca.test, type = "prob")
+roc.multiclass = multiclass.roc(response = true.label, 
+                                predictor = as.matrix(rf.probs))
+auc.value = auc(roc.multiclass)
+
+# Step 5b: Compute per‐class AUCs
+class_levels <- colnames(rf.probs)
+
+auc_values <- sapply(class_levels, function(cls) {
+  # Build a binary response: 1 for this class, 0 otherwise
+  bin_truth <- as.numeric(true.label == cls)
+  # Compute ROC and then its AUC
+  roc_obj <- roc(bin_truth, rf.probs[[cls]], quiet = TRUE)
+  auc(roc_obj)
+})
+
+# Make a little table
+auc_table <- data.frame(
+  Class = class_levels,
+  AUC   = round(auc_values, 3)
+)
+print(auc_table)
+
+# Step 6: Output
+f1.macro
+f2.macro
+auc.value
+
+# Step 7: ROC Curve Plot
+class_levels = colnames(rf.probs)
+
+roc_df <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true.label == class)
+    # Only compute ROC if both classes are present
+  if (length(unique(binary_response)) < 2) {
+    return(NULL)  # Skip this class
+  }
+  
+  roc_obj <- roc(binary_response, rf.probs[[class]], quiet = TRUE)
+  
+  data.frame(
+    fpr = 1 - roc_obj$specificities,
+    tpr = roc_obj$sensitivities,
+    class = class,
+    auc = rep(auc(roc_obj), length(roc_obj$sensitivities))
+  )
+}))
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Test Set: One-vs-Rest ROC Curves for Each Class (Random Forest)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+
+```
+
+### Lasso
+```{r}
+# Main Results (Model Evaluation: Lasso)
+# Step 1: Store predicted labels and true test labels
+true.label = factor(test.data$type)
+lasso.prediction = predict(model.results.pca[["Lasso"]], pca.test)
+
+# Step 2: Create dataframe for evaluation
+evaluate.data = data.frame(
+  truth = true.label,
+  prediction = factor(lasso.prediction, levels = levels(true.label))
+)
+
+# Step 3: F1
+f1.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 1)
+
+# Step 4: F2
+f2.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 2)
+
+# Step 5: Probabilities for AUC
+lasso.probs = predict(model.results.pca[["Lasso"]], pca.test, type = "prob")
+roc.multiclass = multiclass.roc(response = true.label, 
+                                predictor = as.matrix(lasso.probs))
+auc.value = auc(roc.multiclass)
+
+# After Step 5, you have:
+lasso.probs <- predict(model.results.pca[["Lasso"]], pca.test, type = "prob")
+true.label  <- factor(test.data$type)
+
+# Compute per-class AUCs:
+class_levels <- colnames(lasso.probs)
+
+auc_values <- sapply(class_levels, function(cls) {
+  bin_truth <- as.numeric(true.label == cls)
+  roc_obj   <- roc(bin_truth, lasso.probs[[cls]], quiet = TRUE)
+  auc(roc_obj)
+})
+
+# Build and print a table of AUCs
+auc_table <- data.frame(
+  Class = class_levels,
+  AUC   = round(auc_values, 3)
+)
+print(auc_table)
+
+
+# Step 6: Output
+f1.macro
+f2.macro
+auc.value
+
+# Step 7: ROC Curve Plot
+class_levels = colnames(lasso.probs)
+
+roc_df <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true.label == class)
+    # Only compute ROC if both classes are present
+  if (length(unique(binary_response)) < 2) {
+    return(NULL)  # Skip this class
+  }
+  
+  roc_obj <- roc(binary_response, lasso.probs[[class]], quiet = TRUE)
+  
+  data.frame(
+    fpr = 1 - roc_obj$specificities,
+    tpr = roc_obj$sensitivities,
+    class = class,
+    auc = rep(auc(roc_obj), length(roc_obj$sensitivities))
+  )
+}))
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Test Set: One-vs-Rest ROC Curves for Each Class (Lasso)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+```
+
+### Decision Tree
+```{r}
+# Main Results (Model Evaluation: Decision Tree)
+# Step 1: Store predicted labels and true test labels
+true.label = factor(test.data$type)
+tree.prediction = predict(model.results.pca[["Decision Tree"]], pca.test)
+
+# Step 2: Create dataframe for evaluation
+evaluate.data = data.frame(
+  truth = true.label,
+  prediction = factor(tree.prediction, levels = levels(true.label))
+)
+
+# Step 3: F1
+f1.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 1)
+
+# Step 4: F2
+f2.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 2)
+
+# Step 5: Probabilities for AUC
+tree.probs = predict(model.results.pca[["Decision Tree"]], pca.test, type = "prob")
+roc.multiclass = multiclass.roc(response = true.label, 
+                                predictor = as.matrix(tree.probs))
+auc.value = auc(roc.multiclass)
+
+# Step 6: Output
+f1.macro
+f2.macro
+auc.value
+
+# Step 7: ROC Curve Plot
+class_levels = colnames(tree.probs)
+
+roc_df <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true.label == class)
+    # Only compute ROC if both classes are present
+  if (length(unique(binary_response)) < 2) {
+    return(NULL)  # Skip this class
+  }
+  
+  roc_obj <- roc(binary_response, tree.probs[[class]], quiet = TRUE)
+  
+  data.frame(
+    fpr = 1 - roc_obj$specificities,
+    tpr = roc_obj$sensitivities,
+    class = class,
+    auc = rep(auc(roc_obj), length(roc_obj$sensitivities))
+  )
+}))
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Test Set: One-vs-Rest ROC Curves for Each Class (Decision Tree)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+```
+
+### KNN
+```{r}
+# Main Results (Model Evaluation: KNN)
+# Step 1: Store predicted labels and true test labels
+true.label = factor(test.data$type)
+knn.prediction = predict(model.results.pca[["KNN"]], pca.test)
+
+# Step 2: Create dataframe for evaluation
+evaluate.data = data.frame(
+  truth = true.label,
+  prediction = factor(knn.prediction, levels = levels(true.label))
+)
+
+# Step 3: F1
+f1.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 1)
+
+# Step 4: F2
+f2.macro = f_meas(evaluate.data, truth = truth, 
+                  estimate = prediction, beta = 2)
+
+# Step 5: Probabilities for AUC
+knn.probs = predict(model.results.pca[["KNN"]], pca.test, type = "prob")
+roc.multiclass = multiclass.roc(response = true.label, 
+                                predictor = as.matrix(knn.probs))
+auc.value = auc(roc.multiclass)
+
+# Step 6: Output
+f1.macro
+f2.macro
+auc.value
+
+# Step 7: ROC Curve Plot
+class_levels = colnames(knn.probs)
+
+roc_df <- do.call(rbind, lapply(class_levels, function(class) {
+  binary_response <- as.numeric(true.label == class)
+    # Only compute ROC if both classes are present
+  if (length(unique(binary_response)) < 2) {
+    return(NULL)  # Skip this class
+  }
+  
+  roc_obj <- roc(binary_response, knn.probs[[class]], quiet = TRUE)
+  
+  data.frame(
+    fpr = 1 - roc_obj$specificities,
+    tpr = roc_obj$sensitivities,
+    class = class,
+    auc = rep(auc(roc_obj), length(roc_obj$sensitivities))
+  )
+}))
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed", color = "gray") +
+  facet_wrap(~ class, ncol = 3) +
+  theme_minimal() +
+  labs(
+    title = "Test Set: One-vs-Rest ROC Curves for Each Class (KNN)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+```
+
