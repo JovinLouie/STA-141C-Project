@@ -1,5 +1,5 @@
 ---
-title: "STA 141C R Code"
+title: "Supplementary Materials R Code"
 author: "Jenny Xu"
 date: "2025-05-26"
 output:
@@ -197,7 +197,7 @@ print(max_sample)
 all_values = unlist(gene_data, use.names = FALSE)
 expression_df = tibble(Expression = all_values)
 
-ggplot(expression_df, aes(x = Expression)) +
+frequency = ggplot(expression_df, aes(x = Expression)) +
   geom_histogram(bins = 100, fill = "skyblue", color = "black", alpha = 0.5) +
   geom_line(
     stat = "bin",
@@ -216,6 +216,7 @@ ggplot(expression_df, aes(x = Expression)) +
   ) +
   theme_minimal()
 
+
 ```
 
 ## Boxplot of Gene Expression - Why we need normalization/scaling
@@ -227,10 +228,12 @@ expression_df = tibble(Expression = unlist(data[ , -(1:2)], use.names = FALSE))
 # Add dummy variable for plotting
 expression_df$Group = "All Genes"
 
-ggplot(expression_df, aes(y = Group, x = Expression)) +
+boxplot = ggplot(expression_df, aes(y = Group, x = Expression)) +
   geom_boxplot(fill = "skyblue") +
   labs(title = "Overall Distribution of Gene Expression Values",
        y = "", x = "Expression Level")
+
+grid.arrange(frequency, boxplot, ncol = 2)
 ```
 
 ## Boxplot of Gene Expression by Sample
@@ -812,7 +815,7 @@ roc_df <- do.call(rbind, lapply(class_levels, function(class) {
   )
 }))
 
-ggplot(roc_df, aes(x = fpr, y = tpr)) +
+random.forest = ggplot(roc_df, aes(x = fpr, y = tpr)) +
   geom_line(linewidth = 1.2, color = "steelblue") +
   geom_abline(linetype = "dashed", color = "gray") +
   facet_wrap(~ class, ncol = 3) +
@@ -898,7 +901,7 @@ roc_df <- do.call(rbind, lapply(class_levels, function(class) {
   )
 }))
 
-ggplot(roc_df, aes(x = fpr, y = tpr)) +
+lasso = ggplot(roc_df, aes(x = fpr, y = tpr)) +
   geom_line(linewidth = 1.2, color = "steelblue") +
   geom_abline(linetype = "dashed", color = "gray") +
   facet_wrap(~ class, ncol = 3) +
@@ -908,6 +911,12 @@ ggplot(roc_df, aes(x = fpr, y = tpr)) +
     x = "False Positive Rate",
     y = "True Positive Rate"
   )
+
+# Step 8: Confusion matrix
+conf_matrix <- conf_mat(evaluate.data, truth = truth, estimate = prediction)
+
+# Print the matrix
+print(conf_matrix)
 ```
 
 ### Decision Tree
@@ -962,7 +971,7 @@ roc_df <- do.call(rbind, lapply(class_levels, function(class) {
   )
 }))
 
-ggplot(roc_df, aes(x = fpr, y = tpr)) +
+decision.tree = ggplot(roc_df, aes(x = fpr, y = tpr)) +
   geom_line(linewidth = 1.2, color = "steelblue") +
   geom_abline(linetype = "dashed", color = "gray") +
   facet_wrap(~ class, ncol = 3) +
@@ -1026,7 +1035,7 @@ roc_df <- do.call(rbind, lapply(class_levels, function(class) {
   )
 }))
 
-ggplot(roc_df, aes(x = fpr, y = tpr)) +
+knn = ggplot(roc_df, aes(x = fpr, y = tpr)) +
   geom_line(linewidth = 1.2, color = "steelblue") +
   geom_abline(linetype = "dashed", color = "gray") +
   facet_wrap(~ class, ncol = 3) +
@@ -1036,5 +1045,7 @@ ggplot(roc_df, aes(x = fpr, y = tpr)) +
     x = "False Positive Rate",
     y = "True Positive Rate"
   )
+
+grid.arrange(random.forest, lasso, decision.tree, knn, ncol = 2)
 ```
 
